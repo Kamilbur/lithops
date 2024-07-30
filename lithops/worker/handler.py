@@ -222,8 +222,8 @@ def run_task(task):
 
         cpu_info = sys_monitor.get_cpu_info()
         call_status.add('worker_func_cpu_usage', cpu_info['usage'])
-        call_status.add('worker_func_cpu_system_time', round(cpu_info['system'], 8))
-        call_status.add('worker_func_cpu_user_time', round(cpu_info['user'], 8))
+        call_status.add('worker_func_cpu_system_time', [round(x, 8) for x in cpu_info['system']])
+        call_status.add('worker_func_cpu_user_time', [round(x, 8) for x in cpu_info['user']])
 
         net_io = sys_monitor.get_network_io()
         call_status.add('worker_func_sent_net_io', net_io['sent'])
