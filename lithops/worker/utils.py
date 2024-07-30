@@ -15,11 +15,13 @@
 #
 
 import os
+import abc
 import sys
 import pkgutil
 import logging
 import pickle
 import platform
+import threading
 import subprocess
 from contextlib import contextmanager
 
@@ -275,7 +277,36 @@ class LogStream:
         return self._stdout.fileno()
 
 
-class SystemMonitor:
+def psutil_check(default=None):
+    def decorator(func):
+        def decorated(*args, **kwargs):
+            if not psutil_found:
+                return default
+            return func(*args, **kwargs)
+        return decorated
+    return decorator
+
+
+class MonitorBaseMeta(abc.ABCMeta):
+    decorators = {
+        'start': psutil_check(),
+        'stop': psutil_check(),
+        'get_cpu_info': psutil_check({"usage": [], "system": 0, "user": 0}),
+        'get_network_io': psutil_check({"sent": 0, "recv": 0}),
+        'get_memory_info': psutil_check({"rss": 0, "vms": 0, "uss": 0}),
+    }
+
+    def __new__(cls, name, bases, dct):
+        cls_obj = super().__new__(cls, name, bases, dct)
+        for method_name, decorator in cls.decorators.items():
+            if hasattr(cls_obj, method_name):
+                method = getattr(cls_obj, method_name)
+                decorated_method = decorator(method)
+                setattr(cls_obj, method_name, decorated_method)
+        return cls_obj
+
+
+class MonitorBase(abc.ABC, metaclass=MonitorBaseMeta):
 
     def __init__(self, process_id=None):
         """
@@ -283,19 +314,46 @@ class SystemMonitor:
         If process_id is None, monitor the current process.
         """
         self.process_id = process_id
+        self.processor = platform.processor()
         self.cpu_usage = []
         self.process = None
         self.cpu_times = None
         self.current_net_io = None
         self.mem_info = None
 
+    @abc.abstractmethod
     def start(self):
-        """
-        Start monitoring.
-        """
-        if not psutil_found:
-            return
+        pass
 
+    @abc.abstractmethod
+    def stop(self):
+        pass
+
+    @abc.abstractmethod
+    def get_cpu_info(self):
+        """
+        Return CPU usage, system time, and user time for each CPU core.
+        """
+        pass
+
+    @abc.abstractmethod
+    def get_network_io(self):
+        """
+        Calculate network IO (bytes sent and received) since the last reset.
+        """
+        pass
+
+    @abc.abstractmethod
+    def get_memory_info(self):
+        """
+        Get memory usage information of the monitored process.
+        """
+        pass
+
+
+class SystemMonitor(MonitorBase):
+
+    def start(self):
         self.process = psutil.Process(self.process_id)
 
         # record the initial CPU usage (to be ignored).
@@ -306,12 +364,6 @@ class SystemMonitor:
         self.start_net_io = psutil.net_io_counters()
 
     def stop(self):
-        """
-        Stop monitoring.
-        """
-        if not psutil_found:
-            return
-
         # Record the CPU usage since the last call (start).
         self.cpu_usage = psutil.cpu_percent(interval=None, percpu=True)
         self.cpu_times = psutil.cpu_times()
@@ -319,30 +371,74 @@ class SystemMonitor:
         self.mem_info = self.process.memory_full_info()
 
     def get_cpu_info(self):
-        """
-        Return CPU usage, system time, and user time for each CPU core.
-        """
-        if not psutil_found:
-            return {"usage": [], "system": 0, "user": 0}
-
         return {"usage": self.cpu_usage, "system": self.cpu_times.system, "user": self.cpu_times.user}
 
     def get_network_io(self):
-        """
-        Calculate network IO (bytes sent and received) since the last reset.
-        """
-        if not psutil_found:
-            return {"sent": 0, "recv": 0}
-
         bytes_sent = self.current_net_io.bytes_sent - self.start_net_io.bytes_sent
         bytes_recv = self.current_net_io.bytes_recv - self.start_net_io.bytes_recv
         return {"sent": bytes_sent, "recv": bytes_recv}
 
     def get_memory_info(self):
-        """
-        Get memory usage information of the monitored process.
-        """
-        if not psutil_found:
-            return {"rss": 0, "vms": 0, "uss": 0}
-
         return {"rss": self.mem_info.rss, "vms": self.mem_info.vms, "uss": self.mem_info.uss}
+
+
+class TimeGranularSystemMonitor(MonitorBase):
+    def __init__(self, process_id=None, time_interval_secs=1):
+        super().__init__(process_id)
+        self.time_interval_secs = time_interval_secs
+        self.running = False
+        self.cpu_usage = []
+        self.cpu_times_system = []
+        self.cpu_times_user = []
+        self.bytes_sent = []
+        self.bytes_recv = []
+        self.mem_info_rss = []
+        self.mem_info_vms = []
+        self.mem_info_uss = []
+
+    def start(self):
+        self.process = psutil.Process(self.process_id)
+
+        thread = threading.Thread(target=self.monitor, args=(self,))
+        thread.daemon = True
+        thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def get_cpu_info(self):
+        return {"usage": self.cpu_usage, "system": self.cpu_times_system, "user": self.cpu_times_user}
+
+    def get_network_io(self):
+        return {"sent": self.bytes_sent, "recv": self.bytes_recv}
+
+    def get_memory_info(self):
+        return {"rss": self.mem_info_rss, "vms": self.mem_info_vms, "uss": self.mem_info_uss}
+
+    def monitor(self):
+        self.running = True
+        psutil.cpu_percent(interval=None, percpu=True)
+        psutil.net_io_counters.cache_clear()
+        start_net_io = psutil.net_io_counters()
+
+        while self.running:
+            time.sleep(self.time_interval_secs)
+
+            self.cpu_usage.append(psutil.cpu_percent(interval=None, percpu=True))
+            cpu_times = self.process.cpu_times()
+            self.cpu_times_system.append(cpu_times.system)
+            self.cpu_times_user.append(cpu_times.user)
+
+            current_net_io = psutil.net_io_counters()
+            bytes_sent = current_net_io.bytes_sent - start_net_io.bytes_sent
+            bytes_recv = current_net_io.bytes_recv - start_net_io.bytes_recv
+            self.bytes_sent.append(bytes_sent)
+            self.bytes_recv.append(bytes_recv)
+            start_net_io = current_net_io
+
+            mem_info = self.process.memory_full_info()
+            self.mem_info_rss.append(mem_info.rss)
+            self.mem_info_vms.append(mem_info.vms)
+            self.mem_info_uss.append(mem_info.uss)
+
+

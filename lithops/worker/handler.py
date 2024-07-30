@@ -42,7 +42,11 @@ from lithops.worker.utils import LogStream, custom_redirection, \
 from lithops.constants import JOBS_PREFIX, LITHOPS_TEMP_DIR, MODULES_DIR
 from lithops.utils import setup_lithops_logger, is_unix_system
 from lithops.worker.status import create_call_status
-from lithops.worker.utils import SystemMonitor
+
+if os.environ.get('GRANULAR_MONITORING') == 'True':
+    from lithops.worker.utils import TimeGranularSystemMonitor as SystemMonitor
+else:
+    from lithops.worker.utils import SystemMonitor
 
 pickling_support.install()
 
