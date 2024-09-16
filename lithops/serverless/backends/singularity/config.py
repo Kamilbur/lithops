@@ -64,7 +64,8 @@ SINGULARITYFILE_DEFAULT = """
 
 
 def get_singularity_path():
-    singularity_path = shutil.which('singularity')
+    singularity_path = os.environ.get('LITHOPS_HPC_SINGULARITY_PATH')
+    singularity_path = singularity_path or shutil.which('singularity')
     if not singularity_path:
         raise Exception('singularity command not found. Install singularity')
     return singularity_path
