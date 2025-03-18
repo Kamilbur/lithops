@@ -46,7 +46,7 @@ class SingularityBackend:
         self.amqp_url = self.singularity_config['amqp_url']
 
         # Init rabbitmq
-        params = pika.URLParameters(self.amqp_url)
+        params = pika.URLParameters(f'{self.amqp_url}?heartbeat=0')
         self.connection = pika.BlockingConnection(params)
         self.channel = self.connection.channel()
 
